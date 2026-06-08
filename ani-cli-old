@@ -367,26 +367,14 @@ process_hist_entry() {
 }
 
 update_history() {
-    # If the anime is already in history, remove the old line so we can append it fresh
     if grep -q -- "$id" "$histfile"; then
-        grep -v -- "$id" "$histfile" > "${histfile}.new"
+        sed -E "s|^[^	]+	${id}	[^	]+$|${ep_no}	${id}	${title}|" "$histfile" >"${histfile}.new"
     else
         cp "$histfile" "${histfile}.new"
+        printf "%s\t%s\t%s\n" "$ep_no" "$id" "$title" >>"${histfile}.new"
     fi
-    # Append the newest watch record to the absolute bottom
-    printf "%s\t%s\t%s\n" "$ep_no" "$id" "$title" >>"${histfile}.new"
     mv "${histfile}.new" "$histfile"
 }
-
-#update_history() {
-#    if grep -q -- "$id" "$histfile"; then
-#        sed -E "s|^[^	]+	${id}	[^	]+$|${ep_no}	${id}	${title}|" "$histfile" >"${histfile}.new"
-#    else
-#        cp "$histfile" "${histfile}.new"
-#        printf "%s\t%s\t%s\n" "$ep_no" "$id" "$title" >>"${histfile}.new"
-#    fi
-#    mv "${histfile}.new" "$histfile"
-#}
 
 download() {
     case $1 in
@@ -417,7 +405,7 @@ android_mpv() {
 
 play_episode() {
     [ "$log_episode" = 1 ] && [ "$player_function" != "debug" ] && [ "$player_function" != "download" ] && command -v logger >/dev/null && logger -t ani-cli "${allanime_title}${ep_no}"
-    [ "$skip_intro" = 1 ] && skip_flag="$(ani-skip -i "$mal_id" -e "$ep_no")"
+    [ "$skip_intro" = 1 ] && skip_flag="$(ani-skip -q "$mal_id" -e "$ep_no")"
     [ -z "$episode" ] && get_episode_url
     # shellcheck disable=SC2086
     case "$player_function" in
@@ -635,121 +623,32 @@ case "$search" in
         ep_no=$(printf "%s" "$anime_list" | grep "$id" | cut -f2 | sed -nE 's/.*- episode (.+)$/\1/p')
         allanime_title="$(printf "%s" "$title" | cut -d'(' -f1 | tr -d '[:punct:]')"
         ;;
-	*)
-            if [ "$use_external_menu" = "0" ]; then
-                if [ -z "$query" ]; then
-                    printf "\33[2K\r\033[1;34mOpening Live Search...\033[0m"
-                    
-                    export JQ_FILTER='.data[] | "\(.title_english // .title) :: \(.type // "Unknown") - \(.year // "Ongoing")"'
-                    
-                    export HISTORY_PREPEND=""
-                    if [ -s "$histfile" ]; then
-                        last_hist=$(tail -n 1 "$histfile")
-                        last_ep=$(printf "%s" "$last_hist" | cut -f1)
-                        last_id=$(printf "%s" "$last_hist" | cut -f2)
-                        last_title=$(printf "%s" "$last_hist" | cut -f3)
-                        
-                        if [ -n "$last_title" ]; then
-                            export HISTORY_PREPEND="${last_title} :: Last Watched - Episode ${last_ep}\n"
-                        fi
-                    fi
-                    
-                    raw_selection=$(printf "" | fzf \
-                        --prompt="Live Search> " \
-                        --disabled \
-                        --bind 'start:reload(printf "%b" "$HISTORY_PREPEND"; curl -s "https://api.jikan.moe/v4/seasons/now?limit=25" | jq -r "$JQ_FILTER" 2>/dev/null)' \
-                        --bind 'change:reload(sleep 0.2; curl -s -G --data-urlencode "q={q}" "https://api.jikan.moe/v4/anime" -d "limit=25" | jq -r "$JQ_FILTER" 2>/dev/null)')
-                    
-                    [ -z "$raw_selection" ] && exit 1
-                    
-                    # Intercept the history selection so we don't accidentally search for it
-                    if printf "%s" "$raw_selection" | grep -q ":: Last Watched"; then
-                        query="HISTORY_RESUME"
-                    else
-                        query=$(printf "%s" "$raw_selection" | sed 's/ :: .*//')
-                    fi
-                fi
-            else
-                [ -z "$query" ] && query=$(printf "" | external_menu "" "Search anime: " "$external_menu_args")
-                [ -z "$query" ] && exit 1
-            fi
-
-            [ "$search" = "nextep" ] && time_until_next_ep "$query"
-
-            # --- NEW: Bypass the search engine entirely if resuming from history ---
-            if [ "$query" = "HISTORY_RESUME" ]; then
-                id="$last_id"
-                title="$last_title"
-                allanime_title="$(printf "%s" "$title" | cut -d'(' -f1 | tr -d '[:punct:]')"
-                ep_list=$(episodes_list "$id")
-                
-                # Show the custom prompt exactly like your screenshot!
-                [ -z "$ep_no" ] && ep_no=$(printf "%s" "$ep_list" | nth "Select episode (Last watched: $last_ep): " "$multi_selection_flag")
-                [ -z "$ep_no" ] && exit 1
-            else
-                # Standard search execution
-                query=$(printf "%s" "$query" | sed "s| |+|g")
-                anime_list=$(search_anime "$query")
-                [ -z "$anime_list" ] && die "No results found!"
-                [ "$index" -eq "$index" ] 2>/dev/null && result=$(printf "%s" "$anime_list" | sed -n "${index}p")
-                [ -z "$index" ] && result=$(printf "%s" "$anime_list" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select anime: ")
-                [ -z "$result" ] && exit 1
-                title=$(printf "%s" "$result" | cut -f2)
-                allanime_title="$(printf "%s" "$title" | cut -d'(' -f1 | tr -d '[:punct:]')"
-                id=$(printf "%s" "$result" | cut -f1)
-                ep_list=$(episodes_list "$id")
-                
-                [ -z "$ep_no" ] && ep_no=$(printf "%s" "$ep_list" | nth "Select episode: " "$multi_selection_flag")
-                [ -z "$ep_no" ] && exit 1
-            fi
-            ;;
-    esac
-
-       #
-       #if [ "$use_external_menu" = "0" ]; then
-       #     if [ -z "$query" ]; then
-       #         printf "\33[2K\r\033[1;34mOpening Live Search...\033[0m"
-       #         
-       #         # Single quotes prevent any quote-nesting or syntax bugs.
-       #         # When you backspace to blank, Jikan automatically serves general popular recommendations.
-       #         query=$(printf "" | fzf \
-       #             --prompt="Live Search> " \
-       #             --disabled \
-       #             --bind 'start:reload(curl -s "https://api.jikan.moe/v4/anime?order_by=popularity&limit=25" | jq -r ".data[] | .title_english // .title" 2>/dev/null)' \
-       #             --bind 'change:reload(sleep 0.2; curl -s -G --data-urlencode "q={q}" "https://api.jikan.moe/v4/anime" -d "limit=25" | jq -r ".data[] | .title_english // .title" 2>/dev/null)')
-       #         
-       #         [ -z "$query" ] && exit 1
-       #     fi
-       # else
-       #     [ -z "$query" ] && query=$(printf "" | external_menu "" "Search anime: " "$external_menu_args")
-       #     [ -z "$query" ] && exit 1
-       # fi
-	#
-        # if [ "$use_external_menu" = "0" ]; then
-        #     while [ -z "$query" ]; do
-        #         printf "\33[2K\r\033[1;36mSearch anime: \033[0m" && read -r query
-        #     done
-        # else
-        #     [ -z "$query" ] && query=$(printf "" | external_menu "" "Search anime: " "$external_menu_args")
-        #     [ -z "$query" ] && exit 1
-        # fi
+    *)
+        if [ "$use_external_menu" = "0" ]; then
+            while [ -z "$query" ]; do
+                printf "\33[2K\r\033[1;36mSearch anime: \033[0m" && read -r query
+            done
+        else
+            [ -z "$query" ] && query=$(printf "" | external_menu "" "Search anime: " "$external_menu_args")
+            [ -z "$query" ] && exit 1
+        fi
         # for checking new releases by specifying anime name
-        #[ "$search" = "nextep" ] && time_until_next_ep "$query"
+        [ "$search" = "nextep" ] && time_until_next_ep "$query"
 
-        #query=$(printf "%s" "$query" | sed "s| |+|g")
-        #anime_list=$(search_anime "$query")
-        #[ -z "$anime_list" ] && die "No results found!"
-        #[ "$index" -eq "$index" ] 2>/dev/null && result=$(printf "%s" "$anime_list" | sed -n "${index}p")
-        #[ -z "$index" ] && result=$(printf "%s" "$anime_list" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select anime: ")
-        #[ -z "$result" ] && exit 1
-        #title=$(printf "%s" "$result" | cut -f2)
-        #allanime_title="$(printf "%s" "$title" | cut -d'(' -f1 | tr -d '[:punct:]')"
-        #id=$(printf "%s" "$result" | cut -f1)
-        #ep_list=$(episodes_list "$id")
-        #[ -z "$ep_no" ] && ep_no=$(printf "%s" "$ep_list" | nth "Select episode: " "$multi_selection_flag")
-        #[ -z "$ep_no" ] && exit 1
-        #;;
-#esac
+        query=$(printf "%s" "$query" | sed "s| |+|g")
+        anime_list=$(search_anime "$query")
+        [ -z "$anime_list" ] && die "No results found!"
+        [ "$index" -eq "$index" ] 2>/dev/null && result=$(printf "%s" "$anime_list" | sed -n "${index}p")
+        [ -z "$index" ] && result=$(printf "%s" "$anime_list" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select anime: ")
+        [ -z "$result" ] && exit 1
+        title=$(printf "%s" "$result" | cut -f2)
+        allanime_title="$(printf "%s" "$title" | cut -d'(' -f1 | tr -d '[:punct:]')"
+        id=$(printf "%s" "$result" | cut -f1)
+        ep_list=$(episodes_list "$id")
+        [ -z "$ep_no" ] && ep_no=$(printf "%s" "$ep_list" | nth "Select episode: " "$multi_selection_flag")
+        [ -z "$ep_no" ] && exit 1
+        ;;
+esac
 [ "$skip_intro" = 1 ] && mal_id="$(ani-skip -q "${skip_title:-${title}}")"
 
 # moves the cursor up one line and clears that line
