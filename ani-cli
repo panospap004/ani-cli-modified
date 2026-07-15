@@ -138,6 +138,46 @@ where_mpv() {
     printf "%s" "mpv" && return 0
 }
 
+# Writes a small helper script used by the live-search fzf block.
+# It tries Jikan first (short timeout) and falls back to AniList's GraphQL
+# API if Jikan times out / errors / returns no results. This is needed
+# because Jikan's /anime?q= search proxies live to MyAnimeList's own search
+# backend, which has been intermittently down for extended periods, while
+# /top/anime and /seasons/now stay up because they're served from Jikan's
+# 24h cache.
+write_live_search_helper() {
+    _helper="$(mktemp)"
+    cat >"$_helper" <<'HELPEREOF'
+#!/bin/sh
+mode="$1"
+shift
+q="$*"
+
+jikan_filter='.data[] | "\(.title_english // .title) :: \(.type // "Unknown") - \(.year // "Ongoing")"'
+anilist_filter='.data.Page.media[] | "\(.title.english // .title.romaji) :: \(.format // "Unknown") - \(.seasonYear // "Ongoing")"'
+
+if [ "$mode" = "season" ]; then
+    out=$(curl -s --max-time 4 "https://api.jikan.moe/v4/seasons/now?limit=25" 2>/dev/null | jq -r "$jikan_filter" 2>/dev/null)
+    if [ -z "$out" ]; then
+        out=$(curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            --data '{"query":"query{Page(perPage:25){media(sort:TRENDING_DESC,type:ANIME,status:RELEASING){title{english romaji}format seasonYear}}}"}' \
+            https://graphql.anilist.co 2>/dev/null | jq -r "$anilist_filter" 2>/dev/null)
+    fi
+else
+    out=$(curl -s --max-time 4 -G --data-urlencode "q=$q" "https://api.jikan.moe/v4/anime" -d "limit=25" 2>/dev/null | jq -r "$jikan_filter" 2>/dev/null)
+    if [ -z "$out" ]; then
+        out=$(curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            --data "{\"query\":\"query(\$s:String){Page(perPage:25){media(search:\$s,type:ANIME,sort:SEARCH_MATCH){title{english romaji}format seasonYear}}}\",\"variables\":{\"s\":\"$q\"}}" \
+            https://graphql.anilist.co 2>/dev/null | jq -r "$anilist_filter" 2>/dev/null)
+    fi
+fi
+
+printf "%s\n" "$out"
+HELPEREOF
+    chmod +x "$_helper"
+    printf '%s' "$_helper"
+}
+
 cleanup() {
     [ "$player_function" = "android_mpv" ] && : >"/storage/emulated/0/mpv/mpv.config.mp4"
     printf "\033[0m"        # clears colors
@@ -640,8 +680,6 @@ case "$search" in
                 if [ -z "$query" ]; then
                     printf "\33[2K\r\033[1;34mOpening Live Search...\033[0m"
                     
-                    export JQ_FILTER='.data[] | "\(.title_english // .title) :: \(.type // "Unknown") - \(.year // "Ongoing")"'
-                    
                     export HISTORY_PREPEND=""
                     if [ -s "$histfile" ]; then
                         last_hist=$(tail -n 1 "$histfile")
@@ -654,11 +692,14 @@ case "$search" in
                         fi
                     fi
                     
+                    live_search_helper="$(write_live_search_helper)"
+                    export live_search_helper
                     raw_selection=$(printf "" | fzf \
                         --prompt="Live Search> " \
                         --disabled \
-                        --bind 'start:reload(printf "%b" "$HISTORY_PREPEND"; curl -s "https://api.jikan.moe/v4/seasons/now?limit=25" | jq -r "$JQ_FILTER" 2>/dev/null)' \
-                        --bind 'change:reload(sleep 0.2; curl -s -G --data-urlencode "q={q}" "https://api.jikan.moe/v4/anime" -d "limit=25" | jq -r "$JQ_FILTER" 2>/dev/null)')
+                        --bind 'start:reload(printf "%b" "$HISTORY_PREPEND"; sh "$live_search_helper" season)' \
+                        --bind 'change:reload(sleep 0.2; sh "$live_search_helper" search {q})')
+                    rm -f "$live_search_helper"
                     
                     [ -z "$raw_selection" ] && exit 1
                     
